@@ -12,7 +12,7 @@ import retrofit2.HttpException
  *
  * If parsing fails, falls back to the provided [fallback] string.
  */
-fun parseServerError(e: HttpException, fallback: String): String {
+fun parseServerError(e: HttpException, fallback: String = "Something went wrong"): String {
     return try {
         val errorBody = e.response()?.errorBody()?.string()
         if (!errorBody.isNullOrBlank()) {
@@ -23,5 +23,14 @@ fun parseServerError(e: HttpException, fallback: String): String {
         }
     } catch (_: Exception) {
         fallback
+    }
+}
+
+object ErrorParser {
+    fun parse(e: Throwable, fallback: String = "Something went wrong"): String {
+        return when (e) {
+            is HttpException -> parseServerError(e, fallback)
+            else -> e.localizedMessage?.takeIf { it.isNotBlank() } ?: fallback
+        }
     }
 }

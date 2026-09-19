@@ -21,6 +21,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
@@ -36,8 +37,10 @@ import androidx.compose.ui.unit.sp
 import com.aman.featureapp.R
 import com.aman.featureapp.screens.feature.FeatureScreen
 import com.aman.featureapp.screens.home.HomeScreen
+import com.aman.featureapp.screens.home.HomeViewModel
 import com.aman.featureapp.screens.setting.SettingScreen
 import kotlinx.coroutines.launch
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 data class MainTabItem(
     val title: String,
@@ -68,6 +71,9 @@ fun MainScreen() {
     val pagerState = rememberPagerState(initialPage = 0) { tabs.size }
     val coroutineScope = rememberCoroutineScope()
 
+    // Hoist HomeViewModel here so FeatureScreen can trigger edit flow on it
+    val homeViewModel: HomeViewModel = viewModel()
+
     // Back click handler:
     // If not on Home page (index 0), navigate back to Home page.
     // If already on Home page, BackHandler is disabled, allowing default system back (exit/minimize).
@@ -94,12 +100,19 @@ fun MainScreen() {
             state = pagerState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding.calculateTopPadding()-innerPadding.calculateTopPadding())
-
+                .padding(bottom = innerPadding.calculateBottomPadding())
         ) { page ->
             when (page) {
-                0 -> HomeScreen()
-                1 -> FeatureScreen()
+                0 -> HomeScreen(viewModel = homeViewModel)
+                1 -> FeatureScreen(
+                    onEditFeature = { uid, name ->
+                        homeViewModel.startEditFeature(uid, name)
+                        coroutineScope.launch { pagerState.scrollToPage(0) }
+                    },
+                    onFeatureDeleted = { deletedUid ->
+                        homeViewModel.onFeatureDeleted(deletedUid)
+                    }
+                )
                 2 -> SettingScreen()
             }
         }
@@ -107,12 +120,12 @@ fun MainScreen() {
 }
 
 /**
- * Custom YouTube-style bottom tab bar:
- * - Pure white background (#FFFFFF) with no tonal/purple Material tint
- * - Subtle hairline top divider (#E5E5E5)
- * - Clean icon + 10sp label layout without pill container highlight
- * - Active: #0F0F0F (pure black) with filled icon
- * - Inactive: #606060 (dark gray) with outline icon
+ * Custom modern bottom tab bar:
+ * - Solid pure white background (#FFFFFF)
+ * - Crisp hairline top divider (#E2E8F0)
+ * - Clean icon + 11sp label layout without pill container highlight
+ * - Active: #0F172A (dark slate) with filled icon
+ * - Inactive: #64748B (slate gray) with outline icon
  * - Handles navigation bars insets properly
  */
 @Composable
@@ -122,59 +135,63 @@ fun CustomYouTubeTabBar(
     onTabSelected: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(Color(0xFFE5E5E5).copy(alpha = 0.3f))
-            .navigationBarsPadding()
+    Surface(
+        color = Color.White,
+        shadowElevation = 8.dp,
+        modifier = modifier.fillMaxWidth()
     ) {
-        // Thin top hairline divider like YouTube
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(0.6.dp)
-                .background(Color(0xFFE5E5E5).copy(alpha = 0.7f))
-        )
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(50.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .navigationBarsPadding()
         ) {
-            tabs.forEachIndexed { index, tab ->
-                val isSelected = currentPage == index
-                val itemColor = if (isSelected) Color(0xFF0F0F0F) else Color(0xFF606060)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(0.8.dp)
+                    .background(Color(0xFFE2E8F0))
+            )
 
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = ripple(bounded = false, radius = 28.dp)
-                        ) {
-                            onTabSelected(index)
-                        },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        painter = painterResource(
-                            id = if (isSelected) tab.selectedIcon else tab.unselectedIcon
-                        ),
-                        contentDescription = tab.title,
-                        tint = itemColor,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = tab.title,
-                        fontSize = 10.sp,
-                        fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal,
-                        color = itemColor,
-                        maxLines = 1
-                    )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                tabs.forEachIndexed { index, tab ->
+                    val isSelected = currentPage == index
+                    val itemColor = if (isSelected) Color(0xFF0F172A) else Color(0xFF64748B)
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = ripple(bounded = false, radius = 28.dp)
+                            ) {
+                                onTabSelected(index)
+                            },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(
+                                id = if (isSelected) tab.selectedIcon else tab.unselectedIcon
+                            ),
+                            contentDescription = tab.title,
+                            tint = itemColor,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = tab.title,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            color = itemColor,
+                            maxLines = 1
+                        )
+                    }
                 }
             }
         }

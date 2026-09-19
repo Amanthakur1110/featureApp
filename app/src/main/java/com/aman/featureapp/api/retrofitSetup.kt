@@ -40,4 +40,5 @@ object ApiServer {
     }
 
     val authApi: authApis = retrofit.create(authApis::class.java)
+    val featureApi: featureApis = retrofit.create(featureApis::class.java)
 }
