@@ -52,6 +52,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -479,16 +480,17 @@ fun FeatureWebViewScreen(
     onRefresh: () -> Unit,
     onWebViewCreated: (WebView) -> Unit
 ) {
-    Surface(
+    Scaffold(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.White),
-        color = Color.White
-    ) {
+        containerColor = Color.White
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
+                .padding(bottom = innerPadding.calculateBottomPadding())
         ) {
             // ── Native Top Bar (Feels like a real native screen) ─────────
             Column(modifier = Modifier.fillMaxWidth().background(Color.White)) {

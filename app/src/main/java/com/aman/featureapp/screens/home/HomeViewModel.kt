@@ -13,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class UiChatMessage(
@@ -405,20 +406,38 @@ class HomeViewModel : ViewModel() {
                     _uiState.value = syncActiveSession(currentSessions, newActiveId)
                     startPolling(uid, name)
                 } else {
-                    val err = response.message ?: "Failed to start feature generation"
+                    val rawErr = response.message ?: "Could not start creation."
+                    val cleanErr = if (rawErr.contains("html", true) || rawErr.contains("css", true) || rawErr.length > 120) {
+                        "Service is temporarily unavailable. Please try again."
+                    } else {
+                        rawErr
+                    }
                     updateSessionByUid(sessionId) {
                         it.copy(
                             isSending = false,
-                            latestStatus = FeatureBuildStatus.Failed(name, "", err)
+                            latestStatus = FeatureBuildStatus.Failed(name, "", cleanErr),
+                            chatMessages = it.chatMessages + UiChatMessage(
+                                isUser = false,
+                                text = "⚠️ $cleanErr"
+                            )
                         )
                     }
                 }
             } catch (e: Exception) {
-                val err = ErrorParser.parse(e)
+                val rawErr = ErrorParser.parse(e)
+                val cleanErr = if (rawErr.contains("html", true) || rawErr.contains("css", true) || rawErr.length > 120) {
+                    "Could not connect to server. Please check your network."
+                } else {
+                    rawErr
+                }
                 updateSessionByUid(sessionId) {
                     it.copy(
                         isSending = false,
-                        latestStatus = FeatureBuildStatus.Failed(name, "", err)
+                        latestStatus = FeatureBuildStatus.Failed(name, "", cleanErr),
+                        chatMessages = it.chatMessages + UiChatMessage(
+                            isUser = false,
+                            text = "⚠️ $cleanErr"
+                        )
                     )
                 }
             }
@@ -516,123 +535,142 @@ class HomeViewModel : ViewModel() {
     private fun startPolling(uid: String, featureName: String) {
         pollingJobs[uid]?.cancel()
         val job = viewModelScope.launch {
-            var consecutiveErrors = 0
+            var consecutiveNetworkErrors = 0
             var elapsedSeconds = 0L
             var lastHeartbeatSeconds = 0L
-            var pollDelay = 2500L
 
-            while (true) {
+            while (isActive) {
+                // Adaptive poll delay
+                val pollDelay = when {
+                    elapsedSeconds >= 120 -> 10_000L
+                    elapsedSeconds >= 60  -> 6_000L
+                    elapsedSeconds >= 30  -> 4_000L
+                    else                  -> 3_000L
+                }
                 delay(pollDelay)
                 elapsedSeconds += pollDelay / 1000L
 
-                pollDelay = when {
-                    elapsedSeconds >= 90 -> 8000L
-                    elapsedSeconds >= 30 -> 5000L
-                    else -> 2500L
-                }
-
-                // Heartbeat message in chat every 35s
+                // In-chat heartbeat every 40 seconds
                 val secondsSinceHeartbeat = elapsedSeconds - lastHeartbeatSeconds
-                if (secondsSinceHeartbeat >= 35 && elapsedSeconds > 0) {
+                if (secondsSinceHeartbeat >= 40 && elapsedSeconds > 0) {
                     lastHeartbeatSeconds = elapsedSeconds
                     val mins = elapsedSeconds / 60
                     val secs = elapsedSeconds % 60
                     val timeStr = if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
-                    val hint = when {
-                        elapsedSeconds >= 120 -> "Almost there — large apps can take 2-3 minutes! 🔥"
-                        elapsedSeconds >= 60  -> "Still working on it, hang tight… ⚡"
-                        else                  -> "Building your app… ⚙️"
-                    }
                     val session = _uiState.value.sessions.find { it.uid == uid }
                     val alreadyHasThisTime = session?.chatMessages?.any {
-                        !it.isUser && it.text.contains("($timeStr elapsed)")
+                        !it.isUser && it.text.contains("($timeStr")
                     } ?: false
 
                     if (!alreadyHasThisTime) {
-                        appendChatMessageToSession(
-                            uid,
-                            UiChatMessage(
-                                isUser = false,
-                                text = "⏳ Still building ($timeStr elapsed) — $hint"
-                            )
-                        )
+                        appendChatMessageToSession(uid, UiChatMessage(
+                            isUser = false,
+                            text = when {
+                                elapsedSeconds >= 120 -> "⏳ Almost there ($timeStr) — complex features take a bit longer!"
+                                elapsedSeconds >= 60  -> "⏳ Still creating ($timeStr) — hang tight…"
+                                else                  -> "⏳ Still creating ($timeStr)…"
+                            }
+                        ))
                     }
                 }
 
                 try {
                     val statusRes = ApiServer.featureApi.getFeatureStatus(uid)
-                    consecutiveErrors = 0
+                    consecutiveNetworkErrors = 0 // reset on any successful HTTP contact
 
-                    if (statusRes.success && statusRes.data != null) {
-                        val statusData = statusRes.data
-                        when (statusData.status) {
-                            "ready" -> {
-                                updateSessionByUid(uid) { s ->
-                                    s.copy(
-                                        latestStatus = FeatureBuildStatus.Ready(featureName, uid, null),
-                                        chatMessages = s.chatMessages + UiChatMessage(
-                                            isUser = false,
-                                            text = "🎉 \"$featureName\" is ready! Tap **Open Feature** above to launch it."
-                                        )
+                    if (!statusRes.success || statusRes.data == null) {
+                        // Server returned an error (e.g. 404 or backend failure) — stop polling immediately
+                        val err = statusRes.message ?: "Could not get creation status."
+                        updateSessionByUid(uid) { s ->
+                            s.copy(
+                                latestStatus = FeatureBuildStatus.Failed(featureName, uid, err),
+                                chatMessages = s.chatMessages + UiChatMessage(isUser = false, text = "⚠️ $err")
+                            )
+                        }
+                        pollingJobs.remove(uid)
+                        break
+                    }
+
+                    val statusData = statusRes.data
+                    when (statusData.status) {
+                        "ready" -> {
+                            updateSessionByUid(uid) { s ->
+                                s.copy(
+                                    latestStatus = FeatureBuildStatus.Ready(featureName, uid, null),
+                                    chatMessages = s.chatMessages + UiChatMessage(
+                                        isUser = false,
+                                        text = "🎉 \"$featureName\" is ready! Tap **Open Feature** above to launch it."
                                     )
-                                }
-                                pollingJobs.remove(uid)
-                                break
+                                )
                             }
-                            "clarifying" -> {
-                                val question = statusData.pending_question
-                                    ?: "AI needs additional info to proceed."
-                                updateSessionByUid(uid) { s ->
-                                    val alreadyShown = s.chatMessages.any {
-                                        !it.isUser && it.text.contains(question)
-                                    }
-                                    val updatedMessages = if (!alreadyShown) {
-                                        s.chatMessages + UiChatMessage(
-                                            isUser = false,
-                                            text = "❓ Clarification needed:\n$question"
-                                        )
-                                    } else {
-                                        s.chatMessages
-                                    }
-                                    s.copy(
-                                        chatMessages = updatedMessages,
-                                        latestStatus = FeatureBuildStatus.Clarifying(featureName, uid, question),
-                                        currentStep = ChatStep.BUILDING_ACTIVE
-                                    )
+                            pollingJobs.remove(uid)
+                            break
+                        }
+                        "clarifying" -> {
+                            val question = statusData.pending_question
+                                ?: "AI needs additional info to proceed."
+                            updateSessionByUid(uid) { s ->
+                                val alreadyShown = s.chatMessages.any {
+                                    !it.isUser && it.text.contains(question)
                                 }
-                                pollingJobs.remove(uid)
-                                break
+                                val updatedMessages = if (!alreadyShown) {
+                                    s.chatMessages + UiChatMessage(
+                                        isUser = false,
+                                        text = "❓ Clarification needed:\n$question"
+                                    )
+                                } else {
+                                    s.chatMessages
+                                }
+                                s.copy(
+                                    chatMessages = updatedMessages,
+                                    latestStatus = FeatureBuildStatus.Clarifying(featureName, uid, question),
+                                    currentStep = ChatStep.BUILDING_ACTIVE
+                                )
                             }
-                            "error" -> {
-                                val err = statusData.error_msg ?: "Generation encountered an error."
-                                updateSessionByUid(uid) { s ->
-                                    s.copy(
-                                        latestStatus = FeatureBuildStatus.Failed(featureName, uid, err),
-                                        chatMessages = s.chatMessages + UiChatMessage(
-                                            isUser = false,
-                                            text = "❌ Generation failed: $err\n\nYou can tap ✏️ Edit in the Features tab to try again with a different description."
-                                        )
-                                    )
-                                }
-                                pollingJobs.remove(uid)
-                                break
+                            pollingJobs.remove(uid)
+                            break
+                        }
+                        "error" -> {
+                            // Backend reported error: STOP POLLING IMMEDIATELY
+                            val rawErr = statusData.error_msg ?: "Creation encountered an issue."
+                            val cleanErr = if (rawErr.contains("html", ignoreCase = true) ||
+                                               rawErr.contains("css", ignoreCase = true) ||
+                                               rawErr.contains("vite", ignoreCase = true) ||
+                                               rawErr.contains("npm", ignoreCase = true) ||
+                                               rawErr.contains("syntax", ignoreCase = true) ||
+                                               rawErr.contains("compilation", ignoreCase = true) ||
+                                               rawErr.length > 120) {
+                                "Unable to create this feature. Please try describing what you want differently."
+                            } else {
+                                rawErr
                             }
-                            else -> {
-                                // Preserve startTimeMs
-                                updateSessionByUid(uid) { s ->
-                                    val currentBuilding = s.latestStatus as? FeatureBuildStatus.Building
-                                    val startTime = currentBuilding?.startTimeMs ?: s.startTimeMs
-                                    s.copy(
-                                        latestStatus = FeatureBuildStatus.Building(featureName, uid, startTime)
+                            updateSessionByUid(uid) { s ->
+                                s.copy(
+                                    latestStatus = FeatureBuildStatus.Failed(featureName, uid, cleanErr),
+                                    chatMessages = s.chatMessages + UiChatMessage(
+                                        isUser = false,
+                                        text = "❌ $cleanErr\n\nYou can try again with a revised description."
                                     )
-                                }
+                                )
+                            }
+                            pollingJobs.remove(uid)
+                            break
+                        }
+                        else -> {
+                            // Status is "building" or "in_progress"
+                            updateSessionByUid(uid) { s ->
+                                val currentBuilding = s.latestStatus as? FeatureBuildStatus.Building
+                                val startTime = currentBuilding?.startTimeMs ?: s.startTimeMs
+                                s.copy(
+                                    latestStatus = FeatureBuildStatus.Building(featureName, uid, startTime)
+                                )
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    consecutiveErrors++
-                    if (consecutiveErrors >= 5) {
-                        val errMsg = "Lost connection to server after $consecutiveErrors retries. Check your network and retry."
+                    consecutiveNetworkErrors++
+                    if (consecutiveNetworkErrors >= 3) {
+                        val errMsg = "Connection lost after $consecutiveNetworkErrors attempts. Please check your network and retry."
                         updateSessionByUid(uid) { s ->
                             s.copy(
                                 latestStatus = FeatureBuildStatus.Failed(featureName, uid, errMsg),
